@@ -111,92 +111,239 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
    )
 
 async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-   """A simple command to check if the bot is alive."""
    await update.message.reply_text("Pong!")
 
-# ... (All other handlers like handle_new_members, myprogress_command, etc., are the same)
-# For brevity, I am omitting the full code for them, but you should have them in your file.
-# The following is just a placeholder to show where they should be.
 async def handle_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-   # Your full handle_new_members logic here
-   pass
+   if update.message.chat.id != TARGET_GROUP_ID: return
+   adder = update.message.from_user
+   adder_id_str = str(adder.id)
+   num_added = len(update.message.new_chat_members)
+   add_user(adder.id)
+   for member in update.message.new_chat_members:
+       await update.message.reply_html(f"👋 እንኳን ደህና መጣህ/ሽ <b>{member.first_name}</b>!")
+   counts = load_json_data(COUNTS_FILE)
+   current_count = counts.get(adder_id_str, 0) + num_added
+   counts[adder_id_str] = current_count
+   leaderboard = load_json_data(LEADERBOARD_FILE)
+   user_info = leaderboard.get(adder_id_str, {'name': adder.first_name, 'count': 0})
+   user_info['count'] += num_added
+   user_info['name'] = adder.first_name
+   leaderboard[adder_id_str] = user_info
+   save_json_data(LEADERBOARD_FILE, leaderboard)
+   if current_count >= MEMBERS_TO_ADD:
+       eligible_users = load_json_data(ELIGIBLE_USERS_FILE, set)
+       eligible_users.add(adder.id)
+       save_json_data(ELIGIBLE_USERS_FILE, eligible_users)
+       counts[adder_id_str] = 0
+       await update.message.reply_html(
+           f"🎉 <b>እንኳን ደስ አለዎት {adder.first_name}!</b> 🎉\n\n"
+           "ፈተናውን ጨርሰዋል! ብጁ ምስልዎን ለመስራት እባክዎ ከእኔ ጋር በግል ቻት "
+           f"(<a href='tg://user?id={context.bot.id}'>እዚህ ይጫኑ</a>) ይጀምሩና <b>/create</b> ብለው ይጻፉ።"
+       )
+   else:
+       await update.message.reply_html(f"እናመሰግናለን {adder.first_name}! የእርስዎ እድገት: <b>{current_count}/{MEMBERS_TO_ADD}</b>")
+   save_json_data(COUNTS_FILE, counts)
+
 async def myprogress_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-   # Your full myprogress_command logic here
-   pass
+   user_id_str = str(update.effective_user.id)
+   counts = load_json_data(COUNTS_FILE)
+   current_count = counts.get(user_id_str, 0)
+   await update.message.reply_html(f"📈 የእርስዎ እድገት: <b>{current_count}/{MEMBERS_TO_ADD}</b>")
+
 async def top_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-   # Your full top_command logic here
-   pass
+   leaderboard = load_json_data(LEADERBOARD_FILE)
+   if not leaderboard:
+       await update.message.reply_text("እስካሁን ምንም አይነት መረጃ አልተመዘገበም።")
+       return
+   sorted_users = sorted(leaderboard.values(), key=lambda x: x['count'], reverse=True)
+   text = "🏆 <b>የበላጠ አስተዋጽኦ ያደረጉ ተጠቃሚዎች</b> 🏆\n\n"
+   for i, user in enumerate(sorted_users[:5], 1):
+       medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+       text += f"{medals.get(i, f'<b>{i}.</b>')} {user['name']} - {user['count']} አባላት\n"
+   await update.message.reply_html(text)
+
 async def create_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-   # Your full create_command logic here
+   user_id = update.effective_user.id
+   add_user(user_id)
+   if user_id not in load_json_data(ELIGIBLE_USERS_FILE, set):
+       await update.message.reply_html(f"ይቅርታ፣ ይህንን ትዕዛዝ ለመጠቀም መጀመሪያ <b>{MEMBERS_TO_ADD} አባላትን</b> መጨመር አለብዎት።")
+       return ConversationHandler.END
+   try:
+       with open(PREVIEW_FILES[1], "rb") as preview_photo:
+           await update.message.reply_photo(photo=preview_photo, caption="እባክዎ ከገጽ 1 ይምረጡ:", reply_markup=get_style_keyboard(page=1))
+   except FileNotFoundError:
+       await update.message.reply_text(f"የአስተዳዳሪ ስህተት፡ '{PREVIEW_FILES[1]}' አልተገኘም።")
+       return ConversationHandler.END
    return CHOOSING_STYLE
+
 async def handle_page_and_style_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-   # Your full handle_page_and_style_choice logic here
+   query = update.callback_query
+   await query.answer()
+   choice = query.data
+   if choice.startswith('page_'):
+       page_num = int(choice.split('_')[1])
+       try:
+           media = InputMediaPhoto(media=open(PREVIEW_FILES[page_num], 'rb'))
+           await query.edit_message_media(media=media, reply_markup=get_style_keyboard(page=page_num))
+       except FileNotFoundError:
+           await context.bot.send_message(chat_id=query.from_user.id, text=f"የአስተዳዳሪ ስህተት፡ '{PREVIEW_FILES[page_num]}' አልተገኘም።")
+       return CHOOSING_STYLE
+   if choice == 'random_style':
+       choice = random.choice(list(IMAGE_FILES.keys()))
+   context.user_data['chosen_style'] = choice
+   await query.edit_message_caption(caption=f"በጣም ጥሩ! {choice}ን መርጠዋል።")
+   await context.bot.send_message(chat_id=query.from_user.id, text="አሁን በምስሉ ላይ እንዲጻፍ የሚፈልጉትን ስም ይጻፉ።")
    return TYPING_NAME
+
 async def handle_name_and_create(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-   # Your full handle_name_and_create logic here
-   return ConversationHandler.END
-async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-   # Your full admin_command logic here
-   pass
-async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-   # Your full admin_callback_handler logic here
-   return TYPING_BROADCAST
-async def check_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-   # Your full check_user_command logic here
-   pass
-async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-   # Your full handle_broadcast_message logic here
-   return CONFIRM_BROADCAST
-async def handle_broadcast_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-   # Your full handle_broadcast_confirmation logic here
-   return ConversationHandler.END
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-   # Your full cancel logic here
+   name = update.message.text
+   style = context.user_data.get('chosen_style')
+   user_id = update.effective_user.id
+   await update.message.reply_text("አሪፍ! ምስልዎ እየተዘጋጀ ነው፣ እባክዎ ትንሽ ይጠብቁ...")
+   image_file, error_message = create_name_image(name, IMAGE_FILES[style])
+   if image_file:
+       try:
+           with open(image_file, 'rb') as photo:
+               await update.message.reply_photo(photo, caption=f"ለ'{name}' የተዘጋጀው ምስልዎ ይኸውና!")
+           eligible_users = load_json_data(ELIGIBLE_USERS_FILE, set)
+           eligible_users.discard(user_id)
+           save_json_data(ELIGIBLE_USERS_FILE, eligible_users)
+       finally:
+           if os.path.exists(image_file): os.remove(image_file)
+   else:
+       await update.message.reply_text("ይቅርታ፣ ስህተት አጋጥሟል። አስተዳዳሪው እንዲያውቀው ተደርጓል።")
+       await context.bot.send_message(chat_id=ADMIN_ID, text=f"⚠️ የምስል አፈጣጠር አልተሳካም!\n\nተጠቃሚ: {update.effective_user.first_name}\nየስህተት ዝርዝር: `{error_message}`")
+   context.user_data.clear()
    return ConversationHandler.END
 
+async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+   if update.effective_user.id != ADMIN_ID: return
+   keyboard = [[InlineKeyboardButton("📊 ስታቲስቲክስ", callback_data='admin_stats')], [InlineKeyboardButton("📢 መልዕክት ለሁሉም ላክ", callback_data='admin_broadcast')]]
+   await update.message.reply_html("🔑 <b>የአስተዳዳሪ ዳሽቦርድ</b>", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+   query = update.callback_query
+   await query.answer()
+   choice = query.data
+   if choice == 'admin_stats':
+       await query.message.delete()
+       await stats_command(query, context)
+       return ConversationHandler.END
+   elif choice == 'admin_broadcast':
+       await query.message.edit_text("እባክዎ ለሁሉም ተጠቃሚዎች መላክ የሚፈልጉትን መልዕክት ያስገቡ።\nለማቆም /cancel ብለው ይጻፉ።")
+       return TYPING_BROADCAST
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+   user_id = update.effective_user.id if isinstance(update, Update) else update.from_user.id
+   if user_id != ADMIN_ID: return
+   users = load_json_data(USERS_FILE, set)
+   await context.bot.send_message(chat_id=user_id, text=f"📊 የቦት ስታቲስቲክስ\n\n👤 ጠቅላላ ተጠቃሚዎች: {len(users)}")
+
+async def check_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+   if update.effective_user.id != ADMIN_ID: return
+   try:
+       user_id_to_check = int(context.args[0])
+       user_id_str = str(user_id_to_check)
+       counts = load_json_data(COUNTS_FILE)
+       eligible_users = load_json_data(ELIGIBLE_USERS_FILE, set)
+       leaderboard = load_json_data(LEADERBOARD_FILE)
+       current_count = counts.get(user_id_str, 0)
+       is_eligible = user_id_to_check in eligible_users
+       total_adds = leaderboard.get(user_id_str, {}).get('count', 0)
+       text = (f"<b>User Status Check:</b> <code>{user_id_to_check}</code>\n\n"
+               f"<b>Current Progress:</b> {current_count}/{MEMBERS_TO_ADD}\n"
+               f"<b>Total Adds (Leaderboard):</b> {total_adds}\n"
+               f"<b>Eligible for /create:</b> {is_eligible}")
+       await update.message.reply_html(text)
+   except (IndexError, ValueError):
+       await update.message.reply_text("አጠቃቀም: /check_user <user_id>")
+
+async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+   context.user_data['broadcast_message'] = update.message.text
+   users = load_json_data(USERS_FILE, set)
+   await update.message.reply_html(f"<u>የምትልከው መልዕክት</u>:\n\n{update.message.text}\n\nይህ ለ <b>{len(users)}</b> ተጠቃሚዎች ይላካል። እርግጠኛ ነዎት?\nለመላክ <b>yes</b> ብለው ይመልሱ።")
+   return CONFIRM_BROADCAST
+
+async def handle_broadcast_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+   if update.message.text.lower() != 'yes':
+       await update.message.reply_text("የመላክ ሂደቱ ተሰርዟል።")
+   else:
+       await update.message.reply_text("መልዕክቱ በመላክ ላይ ነው...")
+       message_text = context.user_data.get('broadcast_message')
+       users = load_json_data(USERS_FILE, set)
+       success, fail = 0, 0
+       for user_id in users:
+           try:
+               await context.bot.send_message(chat_id=user_id, text=message_text)
+               success += 1
+           except Exception: fail += 1
+           await asyncio.sleep(0.1)
+       await update.message.reply_text(f"✅ ተልኳል: {success}\n❌ አልተላከም: {fail}")
+   context.user_data.clear()
+   return ConversationHandler.END
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+   message = update.callback_query.message if update.callback_query else update.message
+   await message.reply_text('ተግባሩ ተሰርዟል።')
+   context.user_data.clear()
+   return ConversationHandler.END
 
 # --- Bot Setup and Webhook Handling ---
 async def setup_bot():
-   """Initializes the bot application and sets up all handlers."""
    application = Application.builder().token(TELEGRAM_TOKEN).build()
    
-   # Add all your handlers here
+   create_conv = ConversationHandler(
+       entry_points=[CommandHandler('create', create_command, filters=filters.ChatType.PRIVATE)],
+       states={
+           CHOOSING_STYLE: [CallbackQueryHandler(handle_page_and_style_choice)],
+           TYPING_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_name_and_create)],
+       },
+       fallbacks=[CommandHandler('cancel', cancel)],
+   )
+   broadcast_conv = ConversationHandler(
+       entry_points=[CallbackQueryHandler(pattern='^admin_broadcast$', callback=admin_callback_handler)],
+       states={
+           TYPING_BROADCAST: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_broadcast_message)],
+           CONFIRM_BROADCAST: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_broadcast_confirmation)],
+       },
+       fallbacks=[CommandHandler('cancel', cancel)],
+   )
+   
+   application.add_handler(create_conv)
+   application.add_handler(broadcast_conv)
    application.add_handler(CommandHandler("start", start))
-   application.add_handler(CommandHandler("ping", ping_command)) # New test command
-   # ... Add all other handlers (create_conv, broadcast_conv, etc.)
+   application.add_handler(CommandHandler("ping", ping_command))
+   application.add_handler(CommandHandler("myprogress", myprogress_command))
+   application.add_handler(CommandHandler("top", top_command))
+   application.add_handler(CommandHandler("admin", admin_command))
+   application.add_handler(CommandHandler("check_user", check_user_command))
+   application.add_handler(CallbackQueryHandler(pattern='^admin_stats$', callback=admin_callback_handler))
+   application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, handle_new_members))
    
    return application
 
 # --- Flask Routes for Vercel ---
 @app.route('/api', methods=['POST'])
 async def webhook():
-   """Webhook endpoint to process updates from Telegram."""
    try:
        application = await setup_bot()
        update_data = request.get_json(force=True)
        update = Update.de_json(update_data, application.bot)
-       
-       # This is the most critical part. We run the update processing in an async context.
        async with application:
            await application.process_update(update)
-           
        return jsonify({"status": "ok"})
    except Exception as e:
-       # If any error happens, log it and send it to the admin
-       error_message = f"An error occurred in the main webhook handler:\n\n<pre>{traceback.format_exc()}</pre>"
+       error_message = f"Webhook Error:\n<pre>{traceback.format_exc()}</pre>"
        logger.error(error_message)
        try:
-           # Try to build a temporary bot instance just to send the error message
            bot = (await setup_bot()).bot
            await bot.send_message(chat_id=ADMIN_ID, text=error_message, parse_mode='HTML')
        except Exception as e2:
            logger.error(f"Failed to send error message to admin: {e2}")
-           
        return jsonify({"status": "error"}), 500
 
 @app.route('/set_webhook', methods=['GET'])
 async def set_webhook():
-   """Sets the webhook URL with Telegram."""
    if not VERCEL_URL: return "Error: VERCEL_URL environment variable not set.", 500
    application = await setup_bot()
    webhook_url = f"https://{VERCEL_URL}/api"
